@@ -23,6 +23,12 @@ echo "[update-vps] 2/7 Atualizando repositório e imagens base..."
 git pull --ff-only
 docker compose pull --ignore-buildable
 
+EXTERNAL_NET="${DOCKER_EXTERNAL_NETWORK:-lunaesolutionsback_lunae-network}"
+if ! docker network inspect "$EXTERNAL_NET" >/dev/null 2>&1; then
+    echo "[update-vps] Criando rede externa ausente: ${EXTERNAL_NET}..."
+    docker network create "$EXTERNAL_NET" >/dev/null
+fi
+
 echo "[update-vps] 3/7 Reconstruindo e reiniciando containers (preservando volumes e renovando RAM)..."
 docker compose up -d --build --remove-orphans
 

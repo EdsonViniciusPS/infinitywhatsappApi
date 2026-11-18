@@ -1,6 +1,6 @@
 # Infinity WhatsApp API
 
-API WhatsApp em **Python (FastAPI)** construída sobre a **Evolution API v2**, com suporte multi-tenant (API Key e JWT), logs em PostgreSQL, cache/filas em Redis e deploy pronto para **VPS Hostinger** com Docker Compose + Caddy (HTTPS automático).
+API WhatsApp em **Python (FastAPI)** construída sobre a **Evolution API v2**, com suporte multi-tenant (API Key e JWT), logs em PostgreSQL, cache/filas em Redis e deploy pronto para **VPS** com Docker Compose integrado à rede oficial `lunaesolutionsback_lunae-network` (`lunae-nginx`).
 
 ## Recursos Cobertos
 
@@ -30,22 +30,45 @@ Acesse a documentação interativa em `http://localhost:8000/docs`.
 uv run pytest
 ```
 
-## Deploy na VPS Hostinger
+## Deploy na VPS (`lunaesolutionsback_lunae-network` + `lunae-nginx`)
 
-1. Aponte o domínio (ex: `api.seudominio.com.br`) para o IP da VPS Hostinger via registro A.
-2. Copie `.env.example` para `.env` e preencha todas as chaves secretas (`JWT_SECRET_KEY`, `ADMIN_MASTER_KEY`, `EVOLUTION_WEBHOOK_SECRET`, `EVOLUTION_API_KEY`, `GEMINI_API_KEY`, `GEMINI_MODEL`, `POSTGRES_PASSWORD` e `DOMAIN`).
-3. Suba os containers:
+O `docker-compose.yml` foi preparado para conviver sem conflito de portas com a infraestrutura atual da VPS (`lunae-nginx` nas portas 80/443 e demais stacks na porta 8000):
+
+- O serviço `api` sobe como `infinity-whatsapp-api` expondo apenas a porta interna `8000` dentro da rede interna isolada (`infinity_whatsapp_internal`) e da rede externa oficial `lunaesolutionsback_lunae-network`.
+- `postgres`, `redis`, `evolution-api` (`evoapicloud/evolution-api:v2.3.7`) e `backup` ficam isolados em `infinity_whatsapp_internal` com nomes prefixados (`infinity-whatsapp-*`).
+
+### Passo a passo na VPS
+
+1. Aponte o subdomínio escolhido (ex: `infinity-api.lunaesolutions.com.br`) para o IP da VPS (`72.61.219.197`) via registro A.
+2. Clone o projeto na VPS (ex: `/root/apps/infinitywhatsappApi`) e configure o `.env`:
    ```bash
-   docker compose up -d --build
+   cp .env.example .env
+   # Preencha DOMAIN, WEBHOOK_PUBLIC_URL e GEMINI_API_KEY
+   # Os demais segredos (JWT_SECRET_KEY, ADMIN_MASTER_KEY, EVOLUTION_WEBHOOK_SECRET,
+   # POSTGRES_PASSWORD e EVOLUTION_API_KEY) serão gerados automaticamente pelo script caso estejam como change-me-*
    ```
-4. Gere e aplique as migrations iniciais no container da API:
+3. Execute o deploy automatizado (garante a rede `lunaesolutionsback_lunae-network`, sobe os containers, aplica migrations Alembic, valida `/health` e ativa o cron semanal):
    ```bash
-   docker compose exec api alembic revision --autogenerate -m "initial schema"
-   docker compose exec api alembic upgrade head
+   chmod +x scripts/*.sh docker/backup/entrypoint.sh docker/postgres/init-databases.sh
+   ./scripts/deploy-vps.sh
    ```
+4. Publique o domínio no proxy reverso `lunae-nginx` usando o template `docker/nginx/infinity-whatsapp.conf`:
+   - Adicione primeiro o bloco `server` da porta `80` (com `location /.well-known/acme-challenge/`) em `/root/apps/lunaesolutionsback/nginx/nginx.conf`, ajustando `server_name` para o seu domínio.
+   - Valide e recarregue o Nginx:
+     ```bash
+     docker exec lunae-nginx nginx -t && docker exec lunae-nginx nginx -s reload
+     ```
+   - Emita o certificado SSL via Certbot usando o webroot compartilhado com o `lunae-nginx`:
+     ```bash
+     certbot certonly --webroot -w /root/apps/lunaesolutionsback/nginx/certbot/www -d SEU_DOMINIO
+     ```
+   - Adicione o bloco `server` da porta `443` de `docker/nginx/infinity-whatsapp.conf` em `/root/apps/lunaesolutionsback/nginx/nginx.conf` e recarregue o Nginx novamente:
+     ```bash
+     docker exec lunae-nginx nginx -t && docker exec lunae-nginx nginx -s reload
+     ```
 5. Crie o primeiro tenant e API Key usando o header `X-Master-Key`:
    ```bash
-   curl -X POST https://api.seudominio.com.br/api/v1/auth/tenants \
+   curl -X POST https://SEU_DOMINIO/api/v1/auth/tenants \
      -H "X-Master-Key: SEU_ADMIN_MASTER_KEY" \
      -H "Content-Type: application/json" \
      -d '{"name": "Cliente 1", "email": "cliente@empresa.com"}'
@@ -55,7 +78,7 @@ uv run pytest
 
 O `docker-compose.yml` foi blindado contra reinicializações da VPS e atualizações de versão:
 
-- **Volumes com nomes fixos**: `infinity_postgres_data`, `infinity_redis_data`, `infinity_evolution_instances`, `infinity_caddy_data` e `infinity_caddy_config` garantem que os dados e sessões do WhatsApp nunca se percam nem mudem de referência.
+- **Volumes com nomes fixos**: `infinity_postgres_data`, `infinity_redis_data` e `infinity_evolution_instances` garantem que os dados e sessões do WhatsApp nunca se percam nem mudem de referência.
 - **Desligamento gracioso e Redis persistente**: `stop_grace_period: 30s` em `postgres`, `redis` e `evolution-api`, além de `AOF` (`appendfsync everysec`) + snapshot (`--save 60 1`) no Redis.
 - **Backup automático contínuo (container `backup`)**: gera arquivos completos em `./backups/full_backup_<UTC>.tar.gz` (contendo dumps dos bancos `infinity_api` e `evolution`, sessões `/evolution/instances` e dados do Redis) a cada `BACKUP_INTERVAL_SECONDS` (padrão: 6 horas) e remove arquivos mais antigos que `BACKUP_RETENTION_DAYS` (padrão: 7 dias).
 - **Manutenção e reciclagem de memória a cada 7 dias**:
@@ -64,12 +87,10 @@ O `docker-compose.yml` foi blindado contra reinicializações da VPS e atualiza�
 
 ### Comandos na VPS
 
-Na primeira configuração na VPS, dê permissão de execução aos scripts e ative a auto-atualização semanal (a cada 7 dias às 04:00):
-```bash
-chmod +x scripts/*.sh docker/backup/entrypoint.sh docker/postgres/init-databases.sh
-./scripts/setup-auto-update.sh
-```
-
+- **Primeiro deploy completo e agendamento semanal**:
+  ```bash
+  ./scripts/deploy-vps.sh
+  ```
 - **Atualizar a API sem perder dados** (faz backup preventivo, `git pull --ff-only`, rebuild dos containers preservando volumes, `alembic upgrade head`, limpeza de logs + `VACUUM ANALYZE`, `docker image/builder prune` e valida `/health`):
   ```bash
   ./scripts/update-vps.sh
@@ -89,4 +110,3 @@ chmod +x scripts/*.sh docker/backup/entrypoint.sh docker/postgres/init-databases
   - `POST /api/v1/backups/{filename}/restore` — restaura `Tenant`, `ApiKey` e `Instance` a partir de um snapshot `.json.gz`.
   - `DELETE /api/v1/backups/prune` — remove arquivos expirados conforme `BACKUP_RETENTION_DAYS`.
   - `POST /api/v1/backups/maintenance` — dispara manualmente o ciclo de manutenção e limpeza de memória.
-
