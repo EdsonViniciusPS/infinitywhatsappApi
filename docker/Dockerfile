@@ -12,12 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir uv
 
-COPY pyproject.toml ./
-RUN uv pip install --system --no-cache .
-
-COPY alembic.ini ./
+COPY pyproject.toml README.md alembic.ini ./
 COPY alembic ./alembic
 COPY app ./app
+RUN uv pip install --system --no-cache .
 
 EXPOSE 8000
 
